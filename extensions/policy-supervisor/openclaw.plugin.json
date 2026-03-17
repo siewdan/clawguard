@@ -1,0 +1,57 @@
+{
+  "id": "policy-supervisor",
+  "name": "Policy Supervisor",
+  "description": "Supervises selected agent events against a compact policy ruleset.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "rulesPath": { "type": "string" },
+      "auditLogPath": { "type": "string" },
+      "mode": { "type": "string", "enum": ["audit", "enforce"] },
+      "redactSecrets": { "type": "boolean" },
+      "checkLlmInput": { "type": "boolean" },
+      "checkLlmOutput": { "type": "boolean" },
+      "checkToolCalls": { "type": "boolean" },
+      "checkOutgoingMessages": { "type": "boolean" },
+      "failClosedTools": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "maxContextChars": { "type": "number", "minimum": 100 },
+      "timeoutMs": { "type": "number", "minimum": 1 },
+      "supervisor": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "baseUrl": { "type": "string" },
+          "model": { "type": "string" },
+          "apiKey": { "type": "string" },
+          "apiKeyEnv": { "type": "string" },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "timeoutMs": { "type": "number", "minimum": 1 },
+          "maxTokens": { "type": "number", "minimum": 1 }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "rulesPath": { "label": "Rules Path", "placeholder": "./policies/SUPERVISOR_RULES.md" },
+    "auditLogPath": { "label": "Audit Log Path", "placeholder": "./logs/policy-supervisor.jsonl" },
+    "mode": { "label": "Mode" },
+    "redactSecrets": { "label": "Redact Secrets" },
+    "checkLlmInput": { "label": "Check LLM Input" },
+    "checkLlmOutput": { "label": "Check LLM Output" },
+    "checkToolCalls": { "label": "Check Tool Calls" },
+    "checkOutgoingMessages": { "label": "Check Outgoing Messages" },
+    "failClosedTools": { "label": "Fail-Closed Tools" },
+    "maxContextChars": { "label": "Max Context Chars" },
+    "timeoutMs": { "label": "Default Timeout (ms)" },
+    "supervisor": { "label": "Supervisor Model" }
+  }
+}

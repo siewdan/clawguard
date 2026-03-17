@@ -1,0 +1,15 @@
+{
+  "name": "policy-supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw policy supervisor plugin",
+  "scripts": {
+    "test": "node --test"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Policy Supervisor Log Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/clawguard
+Environment=POLICY_SUPERVISOR_LIVE_ROOT=%h/.openclaw/workspace
+ExecStart=/usr/bin/python3 %h/clawguard/scripts/policy-supervisor-web-server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

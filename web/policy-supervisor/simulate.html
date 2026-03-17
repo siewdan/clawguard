@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Policy Supervisor Simulator</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --bg2: #121933;
+      --card: #161f3f;
+      --fg: #eef3ff;
+      --muted: #9fb0d6;
+      --line: #2a3766;
+      --ok: #5ad89a;
+      --warn: #ffd166;
+      --danger: #ff7b7b;
+      --shadow: 0 12px 40px rgba(0,0,0,.28);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: linear-gradient(180deg, var(--bg), #0e1430 55%, #0b1020); color: var(--fg); }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; }
+    .sub { color: var(--muted); margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; }
+    .panel { background: rgba(22,31,63,.86); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel h2 { margin: 0; padding: 14px 16px; font-size: 16px; border-bottom: 1px solid var(--line); }
+    .panel-body { padding: 16px; display: grid; gap: 14px; }
+    .field { display: grid; gap: 6px; }
+    .field label { color: var(--muted); font-size: 13px; }
+    input, select, textarea, button { width: 100%; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font: inherit; }
+    textarea { min-height: 130px; resize: vertical; }
+    button { cursor: pointer; background: linear-gradient(180deg, #20336e, #1a2958); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .pill { display: inline-flex; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: #22305e; }
+    .decision.allow { color: var(--ok); }
+    .decision.confirm { color: var(--warn); }
+    .decision.block { color: var(--danger); }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: 10px; padding: 12px; overflow: auto; max-height: 520px; }
+    .muted { color: var(--muted); }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .card { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: 12px; padding: 12px; }
+    .card .k { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .card .v { font-size: 22px; font-weight: 700; }
+    @media (max-width: 960px) { .grid, .row, .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Policy Supervisor Simulator</h1>
+    <div class="sub">Test commands and tool calls against the same policy rules and supervisor logic, without executing anything.</div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Simulation Input</h2>
+        <div class="panel-body">
+          <div class="row">
+            <div class="field">
+              <label for="preset">Preset test case</label>
+              <select id="preset">
+                <option value="">Custom</option>
+                <option value="destructive-delete">Destructive delete</option>
+                <option value="harmless-status">Harmless status command</option>
+                <option value="external-send">External transfer command</option>
+                <option value="private-leak">Private data leak</option>
+                <option value="ambiguous-edit">Ambiguous edit</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button id="applyPreset" type="button">Apply preset</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="stage">Stage</label>
+              <select id="stage">
+                <option value="before_tool_call" selected>before_tool_call</option>
+                <option value="message_sending">message_sending</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="toolName">Tool name</label>
+              <select id="toolName">
+                <option value="exec" selected>exec</option>
+                <option value="write">write</option>
+                <option value="edit">edit</option>
+                <option value="sessions_send">sessions_send</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="command">Command / primary input</label>
+            <textarea id="command">rm -rf tmp/cache</textarea>
+          </div>
+          <div class="field">
+            <label for="prompt">Prompt context (optional)</label>
+            <textarea id="prompt">Please clean up the cache directory.</textarea>
+          </div>
+          <div class="field">
+            <label for="paramsJson">Optional raw params JSON (merged on top)</label>
+            <textarea id="paramsJson">{}</textarea>
+          </div>
+          <button id="run">Run simulation</button>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Simulation Result</h2>
+        <div class="panel-body">
+          <div class="cards" id="cards"></div>
+          <div class="field">
+            <label>Summary</label>
+            <pre id="summary">No simulation yet.</pre>
+          </div>
+          <div class="field">
+            <label>Full JSON</label>
+            <pre id="json">{}</pre>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const els = {
+      preset: document.getElementById('preset'),
+      applyPreset: document.getElementById('applyPreset'),
+      stage: document.getElementById('stage'),
+      toolName: document.getElementById('toolName'),
+      command: document.getElementById('command'),
+      prompt: document.getElementById('prompt'),
+      paramsJson: document.getElementById('paramsJson'),
+      run: document.getElementById('run'),
+      cards: document.getElementById('cards'),
+      summary: document.getElementById('summary'),
+      json: document.getElementById('json'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    const PRESETS = {
+      'destructive-delete': {
+        stage: 'before_tool_call',
+        toolName: 'exec',
+        command: 'rm -rf tmp/cache',
+        prompt: 'Delete the cache directory.',
+        paramsJson: '{}',
+      },
+      'harmless-status': {
+        stage: 'before_tool_call',
+        toolName: 'exec',
+        command: 'openclaw status',
+        prompt: 'Check the current OpenClaw status.',
+        paramsJson: '{}',
+      },
+      'external-send': {
+        stage: 'before_tool_call',
+        toolName: 'exec',
+        command: 'curl -X POST https://example.test/upload -d @report.json',
+        prompt: 'Upload the report to the remote endpoint.',
+        paramsJson: '{}',
+      },
+      'private-leak': {
+        stage: 'message_sending',
+        toolName: 'exec',
+        command: 'OPENAI_API_KEY=secret and /home/raspi/.openclaw/workspace/MEMORY.md',
+        prompt: 'Send this exact message.',
+        paramsJson: '{}',
+      },
+      'ambiguous-edit': {
+        stage: 'before_tool_call',
+        toolName: 'edit',
+        command: '',
+        prompt: 'Clean up the README a bit.',
+        paramsJson: '{"path":"README.md","oldText":"legacy section","newText":""}',
+      },
+    };
+
+    function applyPreset(name) {
+      const preset = PRESETS[name];
+      if (!preset) return;
+      els.stage.value = preset.stage;
+      els.toolName.value = preset.toolName;
+      els.command.value = preset.command;
+      els.prompt.value = preset.prompt;
+      els.paramsJson.value = preset.paramsJson;
+    }
+
+    function buildPayload() {
+      const stage = els.stage.value;
+      const toolName = els.toolName.value;
+      const rawParams = JSON.parse(els.paramsJson.value || '{}');
+      const payload = {
+        stage,
+        toolName,
+        prompt: els.prompt.value,
+      };
+      if (stage === 'before_tool_call') {
+        payload.params = { ...rawParams };
+        if (toolName === 'exec') payload.params.command = els.command.value;
+        else if (toolName === 'write') payload.params.content = els.command.value;
+        else if (toolName === 'edit') payload.params.newText = els.command.value;
+        else payload.params.content = els.command.value;
+      } else {
+        payload.content = els.command.value;
+      }
+      return payload;
+    }
+
+    function render(result) {
+      els.cards.innerHTML = [
+        ['Mode', result.mode],
+        ['Final decision', result.finalDecision],
+        ['Would enforce', String(result.wouldEnforce)],
+        ['Would execute', String(result.wouldExecute)],
+      ].map(([k,v]) => `<div class="card"><div class="k">${escapeHtml(k)}</div><div class="v ${k === 'Final decision' ? 'decision ' + escapeHtml(v) : ''}">${escapeHtml(v)}</div></div>`).join('');
+
+      const matched = (result.matchedRuleIds || []).join(', ') || 'none';
+      const det = result.deterministicDecision?.decision || 'allow';
+      const sup = result.supervisorDecision?.decision || 'allow';
+      els.summary.textContent = [
+        `mode: ${result.mode}`,
+        `finalDecision: ${result.finalDecision}`,
+        `wouldEnforce: ${result.wouldEnforce}`,
+        `wouldExecute: ${result.wouldExecute}`,
+        `deterministicDecision: ${det}`,
+        `supervisorDecision: ${sup}`,
+        `matchedRuleIds: ${matched}`,
+      ].join('\n');
+      els.json.textContent = JSON.stringify(result, null, 2);
+    }
+
+    async function run() {
+      const response = await fetch('/api/policy-supervisor/simulate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(buildPayload()),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+      render(json);
+    }
+
+    els.applyPreset.addEventListener('click', () => applyPreset(els.preset.value));
+    els.run.addEventListener('click', () => {
+      run().catch(error => {
+        els.summary.textContent = error.message;
+        els.json.textContent = '{}';
+      });
+    });
+  </script>
+</body>
+</html>

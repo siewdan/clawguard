@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Policy Supervisor Logs</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --bg-2: #121933;
+      --card: #161f3f;
+      --fg: #eef3ff;
+      --muted: #9fb0d6;
+      --line: #2a3766;
+      --ok: #5ad89a;
+      --warn: #ffd166;
+      --danger: #ff7b7b;
+      --revise: #c084fc;
+      --chip: #22305e;
+      --shadow: 0 12px 40px rgba(0,0,0,.28);
+      --subject-col: 28;
+      --reason-col: 26;
+      --details-col: 32;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: linear-gradient(180deg, var(--bg), #0e1430 55%, #0b1020); color: var(--fg); }
+    .wrap { max-width: 1600px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .sub { color: var(--muted); margin-bottom: 20px; }
+    .toolbar, .cards, .layout { display: grid; gap: 14px; }
+    .toolbar { grid-template-columns: 2fr 180px 180px 140px auto auto; align-items: end; margin-bottom: 16px; }
+    .field { display: grid; gap: 6px; }
+    .field label { color: var(--muted); font-size: 13px; }
+    input, select, button { width: 100%; background: var(--bg-2); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font: inherit; }
+    button { cursor: pointer; background: linear-gradient(180deg, #20336e, #1a2958); }
+    button.secondary { background: var(--bg-2); }
+    .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 16px; }
+    .card { background: rgba(22,31,63,.86); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 16px; min-height: 94px; }
+    .card .k { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+    .card .v { font-size: 26px; font-weight: 700; }
+    .layout { grid-template-columns: 340px 1fr; align-items: start; }
+    .panel { background: rgba(22,31,63,.86); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel h2 { margin: 0; padding: 14px 16px; font-size: 16px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.02); }
+    .panel-body { padding: 14px 16px; }
+    .list { display: grid; gap: 10px; }
+    .mini { color: var(--muted); font-size: 12px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 10px; background: var(--chip); color: var(--fg); font-size: 12px; border: 1px solid var(--line); }
+    .stage-counts, .decision-counts { display: flex; flex-wrap: wrap; gap: 8px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { text-align: left; vertical-align: top; padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,.06); font-size: 14px; }
+    th { color: var(--muted); font-size: 12px; position: sticky; top: 0; background: #131b37; }
+    th.col-time, td.col-time { width: 128px; }
+    th.col-stage, td.col-stage { width: 90px; }
+    th.col-decision, td.col-decision { width: 88px; }
+    th.col-subject, td.col-subject { width: calc(var(--subject-col) * 1%); }
+    th.col-reason, td.col-reason { width: calc(var(--reason-col) * 1%); }
+    th.col-details, td.col-details { width: calc(var(--details-col) * 1%); }
+    tr:hover td { background: rgba(255,255,255,.02); }
+    .decision.allow { color: var(--ok); }
+    .decision.confirm { color: var(--warn); }
+    .decision.block { color: var(--danger); }
+    .decision.revise { color: var(--revise); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .truncate { max-width: 640px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+    .wrap-code { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #d8e2ff; }
+    .reason-text { white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
+    .json-inline { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #d8e2ff; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: 10px; padding: 10px; max-height: 320px; overflow: auto; }
+    .range-wrap { display: grid; gap: 6px; }
+    .range-value { color: var(--muted); font-size: 12px; }
+    .subject { display: grid; gap: 6px; min-width: 0; }
+    .subject-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .subject-title { font-weight: 600; }
+    .subject-meta { color: var(--muted); font-size: 12px; }
+    details { border: 1px solid rgba(255,255,255,.06); border-radius: 10px; padding: 8px 10px; background: rgba(255,255,255,.02); }
+    pre { margin: 10px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #d8e2ff; }
+    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .empty { padding: 22px; color: var(--muted); }
+    @media (max-width: 1200px) { .layout { grid-template-columns: 1fr; } .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 900px) { .toolbar { grid-template-columns: 1fr 1fr; } .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Policy Supervisor Logs</h1>
+    <div class="sub">Live view for <span class="mono">logs/policy-supervisor.jsonl</span> · Auto-refresh enabled by default</div>
+
+    <div class="toolbar">
+      <div class="field">
+        <label for="query">Search</label>
+        <input id="query" placeholder="stage, command, toolName, reason, model, runId …">
+      </div>
+      <div class="field">
+        <label for="stage">Stage</label>
+        <select id="stage"><option value="">All</option></select>
+      </div>
+      <div class="field">
+        <label for="decision">Decision</label>
+        <select id="decision">
+          <option value="">All</option>
+          <option>allow</option>
+          <option>confirm</option>
+          <option>block</option>
+          <option>revise</option>
+          <option>error</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="limit">Rows</label>
+        <select id="limit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select>
+      </div>
+      <div class="field"><label>&nbsp;</label><button id="refresh">Refresh</button></div>
+      <div class="field"><label>&nbsp;</label><button id="toggleAuto" class="secondary">Auto: on</button></div>
+    </div>
+
+    <div class="column-controls">
+      <div class="field range-wrap">
+        <label for="subjectWidth">Subject width</label>
+        <input id="subjectWidth" type="range" min="18" max="40" step="1" value="28">
+        <div class="range-value" id="subjectWidthValue">28%</div>
+      </div>
+      <div class="field range-wrap">
+        <label for="reasonWidth">Reason width</label>
+        <input id="reasonWidth" type="range" min="18" max="40" step="1" value="26">
+        <div class="range-value" id="reasonWidthValue">26%</div>
+      </div>
+      <div class="field range-wrap">
+        <label for="detailsWidth">Details width</label>
+        <input id="detailsWidth" type="range" min="20" max="48" step="1" value="32">
+        <div class="range-value" id="detailsWidthValue">32%</div>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="resetWidths" class="secondary">Reset column widths</button>
+      </div>
+    </div>
+
+    <div class="cards" id="cards"></div>
+
+    <div class="layout">
+      <section class="panel">
+        <h2>Overview</h2>
+        <div class="panel-body">
+          <div class="status-row">
+            <span class="pill" id="lastRefresh">Not loaded yet</span>
+            <span class="pill" id="visibleCount">0 visible</span>
+          </div>
+          <div class="list">
+            <div>
+              <div class="mini">Stages</div>
+              <div class="stage-counts" id="stageCounts"></div>
+            </div>
+            <div>
+              <div class="mini">Decisions</div>
+              <div class="decision-counts" id="decisionCounts"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Entries</h2>
+        <div class="panel-body table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-time">Time</th>
+                <th class="col-stage">Stage</th>
+                <th class="col-decision">Decision</th>
+                <th class="col-subject">Subject</th>
+                <th class="col-reason">Reason</th>
+                <th class="col-details">Details</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <div class="empty" id="empty" hidden>No entries for the current filter.</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const LOG_URL = '/logs/policy-supervisor.jsonl';
+    const state = { entries: [], auto: true, timer: null };
+    const els = {
+      query: document.getElementById('query'),
+      stage: document.getElementById('stage'),
+      decision: document.getElementById('decision'),
+      limit: document.getElementById('limit'),
+      refresh: document.getElementById('refresh'),
+      toggleAuto: document.getElementById('toggleAuto'),
+      cards: document.getElementById('cards'),
+      stageCounts: document.getElementById('stageCounts'),
+      decisionCounts: document.getElementById('decisionCounts'),
+      rows: document.getElementById('rows'),
+      empty: document.getElementById('empty'),
+      lastRefresh: document.getElementById('lastRefresh'),
+      visibleCount: document.getElementById('visibleCount'),
+      subjectWidth: document.getElementById('subjectWidth'),
+      reasonWidth: document.getElementById('reasonWidth'),
+      detailsWidth: document.getElementById('detailsWidth'),
+      subjectWidthValue: document.getElementById('subjectWidthValue'),
+      reasonWidthValue: document.getElementById('reasonWidthValue'),
+      detailsWidthValue: document.getElementById('detailsWidthValue'),
+      resetWidths: document.getElementById('resetWidths'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    function readLines(text) { return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean); }
+    function setColumnWidths(subject, reason, details) {
+      document.documentElement.style.setProperty('--subject-col', subject);
+      document.documentElement.style.setProperty('--reason-col', reason);
+      document.documentElement.style.setProperty('--details-col', details);
+      els.subjectWidth.value = subject;
+      els.reasonWidth.value = reason;
+      els.detailsWidth.value = details;
+      els.subjectWidthValue.textContent = `${subject}%`;
+      els.reasonWidthValue.textContent = `${reason}%`;
+      els.detailsWidthValue.textContent = `${details}%`;
+      localStorage.setItem('policySupervisorColumnWidths', JSON.stringify({ subject, reason, details }));
+    }
+    function loadColumnWidths() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('policySupervisorColumnWidths') || '{}');
+        setColumnWidths(saved.subject || 28, saved.reason || 26, saved.details || 32);
+      } catch {
+        setColumnWidths(28, 26, 32);
+      }
+    }
+    function parseJsonl(text) {
+      return readLines(text).map((line, index) => {
+        try { return JSON.parse(line); }
+        catch (error) { return { ts: null, stage: 'parse_error', decision: 'error', reason: error.message, rawLine: line, line: index + 1 }; }
+      });
+    }
+    function formatTs(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts);
+      return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+    }
+    function countBy(items, keyFn) {
+      const map = new Map();
+      for (const item of items) {
+        const key = keyFn(item) || '—';
+        map.set(key, (map.get(key) || 0) + 1);
+      }
+      return [...map.entries()].sort((a, b) => b[1] - a[1]);
+    }
+    function fillStageOptions(entries) {
+      const current = els.stage.value;
+      const stages = [...new Set(entries.map(e => e.stage).filter(Boolean))].sort();
+      els.stage.innerHTML = '<option value="">All</option>' + stages.map(s => `<option>${escapeHtml(s)}</option>`).join('');
+      els.stage.value = stages.includes(current) ? current : '';
+    }
+    function applyFilters(entries) {
+      const query = els.query.value.trim().toLowerCase();
+      const stage = els.stage.value;
+      const decision = els.decision.value;
+      const limit = Number(els.limit.value || 100);
+      const filtered = [...entries].reverse().filter(entry => {
+        if (stage && entry.stage !== stage) return false;
+        if (decision && (entry.decision || '') !== decision) return false;
+        if (!query) return true;
+        return JSON.stringify(entry).toLowerCase().includes(query);
+      });
+      return filtered.slice(0, limit);
+    }
+    function renderCards(entries, visible) {
+      const last = entries.at(-1);
+      const cards = [
+        ['Total', entries.length],
+        ['Visible', visible.length],
+        ['Allow', entries.filter(e => e.decision === 'allow').length],
+        ['Confirm', entries.filter(e => e.decision === 'confirm').length],
+        ['Block', entries.filter(e => e.decision === 'block').length],
+        ['Errors', entries.filter(e => e.decision === 'error' || e.stage === 'parse_error').length],
+      ];
+      els.cards.innerHTML = cards.map(([k, v]) => `<div class="card"><div class="k">${escapeHtml(k)}</div><div class="v">${v}</div></div>`).join('');
+      els.lastRefresh.textContent = last?.ts ? `Latest log entry: ${formatTs(last.ts)}` : 'No entries yet';
+      els.visibleCount.textContent = `${visible.length} visible`;
+    }
+    function renderCounts(target, pairs) {
+      target.innerHTML = pairs.map(([key, count]) => `<span class="pill"><span>${escapeHtml(key)}</span><strong>${count}</strong></span>`).join('');
+    }
+    function subjectHtml(entry) {
+      const title = entry.toolName || entry.model || entry.provider || entry.stage || '—';
+      const command = entry.command || entry.path || entry.target || entry.toolContext || '';
+      const meta = [entry.runId, entry.sessionId, entry.toolCallId].filter(Boolean).join(' · ');
+      const contentPreview = entry.contentPreview || entry.content || entry.resultPreview || '';
+      return `
+        <div class="subject">
+          <div class="subject-top">
+            <span class="pill">${escapeHtml(title)}</span>
+            ${entry.decisionSource ? `<span class="pill">${escapeHtml(entry.decisionSource)}</span>` : ''}
+          </div>
+          ${command ? `<div class="wrap-code">${escapeHtml(command)}</div>` : ''}
+          ${contentPreview ? `<div class="wrap-code">${escapeHtml(contentPreview)}</div>` : ''}
+          ${meta ? `<div class="subject-meta mono">${escapeHtml(meta)}</div>` : ''}
+        </div>`;
+    }
+    function renderRows(entries) {
+      if (entries.length === 0) {
+        els.rows.innerHTML = '';
+        els.empty.hidden = false;
+        return;
+      }
+      els.empty.hidden = true;
+      els.rows.innerHTML = entries.map(entry => {
+        const decision = entry.decision || '—';
+        const details = escapeHtml(JSON.stringify(entry, null, 2));
+        return `
+          <tr>
+            <td class="mono col-time">${escapeHtml(formatTs(entry.ts))}</td>
+            <td class="col-stage"><span class="pill">${escapeHtml(entry.stage || '—')}</span></td>
+            <td class="col-decision"><strong class="decision ${escapeHtml(decision)}">${escapeHtml(decision)}</strong></td>
+            <td class="col-subject">${subjectHtml(entry)}</td>
+            <td class="col-reason"><div class="reason-text">${escapeHtml(entry.reason || '')}</div></td>
+            <td class="col-details"><pre class="json-inline">${details}</pre></td>
+          </tr>`;
+      }).join('');
+    }
+    function render() {
+      fillStageOptions(state.entries);
+      const visible = applyFilters(state.entries);
+      renderCards(state.entries, visible);
+      renderCounts(els.stageCounts, countBy(state.entries, e => e.stage));
+      renderCounts(els.decisionCounts, countBy(state.entries, e => e.decision || '—'));
+      renderRows(visible);
+    }
+    async function load() {
+      const res = await fetch(`${LOG_URL}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      state.entries = parseJsonl(await res.text());
+      render();
+    }
+    function schedule() {
+      clearTimeout(state.timer);
+      if (!state.auto) return;
+      state.timer = setTimeout(async () => {
+        try { await load(); } catch (error) { console.error(error); } finally { schedule(); }
+      }, 3000);
+    }
+    els.refresh.addEventListener('click', async () => { await load(); schedule(); });
+    els.toggleAuto.addEventListener('click', () => { state.auto = !state.auto; els.toggleAuto.textContent = `Auto: ${state.auto ? 'on' : 'off'}`; schedule(); });
+    [els.query, els.stage, els.decision, els.limit].forEach(el => el.addEventListener('input', render));
+    [els.stage, els.decision, els.limit].forEach(el => el.addEventListener('change', render));
+    [els.subjectWidth, els.reasonWidth, els.detailsWidth].forEach(() => {});
+    els.subjectWidth.addEventListener('input', () => setColumnWidths(Number(els.subjectWidth.value), Number(els.reasonWidth.value), Number(els.detailsWidth.value)));
+    els.reasonWidth.addEventListener('input', () => setColumnWidths(Number(els.subjectWidth.value), Number(els.reasonWidth.value), Number(els.detailsWidth.value)));
+    els.detailsWidth.addEventListener('input', () => setColumnWidths(Number(els.subjectWidth.value), Number(els.reasonWidth.value), Number(els.detailsWidth.value)));
+    els.resetWidths.addEventListener('click', () => setColumnWidths(28, 26, 32));
+    loadColumnWidths();
+    load().catch(error => {
+      els.empty.hidden = false;
+      els.empty.textContent = `Could not load log: ${error.message}`;
+      console.error(error);
+    }).finally(schedule);
+  </script>
+</body>
+</html>
