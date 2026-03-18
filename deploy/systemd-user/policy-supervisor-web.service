@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/clawguard
+EnvironmentFile=%h/.config/policy-supervisor-web.env
 Environment=POLICY_SUPERVISOR_LIVE_ROOT=%h/.openclaw/workspace
 ExecStart=/usr/bin/python3 %h/clawguard/scripts/policy-supervisor-web-server.py
 Restart=always

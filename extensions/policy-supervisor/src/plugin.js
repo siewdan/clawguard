@@ -1,10 +1,9 @@
 import { resolvePluginConfig } from "./config.js";
 import { loadRules } from "./rules.js";
-import { selectRules } from "./selectors.js";
-import { evaluateDeterministicDecision } from "./deterministic.js";
-import { callSupervisor } from "./supervisor-client.js";
 import { writeAuditEvent } from "./audit.js";
 import { redactText, truncateText } from "./redact.js";
+import { callSupervisor } from "./supervisor-client.js";
+import { evaluatePolicyDecision, summarizeRules } from "./policy-engine.js";
 
 function safeSerialize(value) {
   try {
@@ -12,15 +11,6 @@ function safeSerialize(value) {
   } catch {
     return String(value);
   }
-}
-
-function summarizeRules(rules) {
-  return rules.map((rule) => ({
-    id: rule.id,
-    action: rule.action,
-    severity: rule.severity,
-    description: rule.description,
-  }));
 }
 
 function decisionToToolResult(decision) {
@@ -49,14 +39,6 @@ function decisionToOutgoingResult(decision) {
     };
   }
   return undefined;
-}
-
-function normalizeDecisionForTool(decision) {
-  if (!decision) return null;
-  if (decision.decision === "revise") {
-    return { ...decision, decision: "confirm" };
-  }
-  return decision;
 }
 
 function makeSafeText(text, cfg, maxChars = cfg.maxContextChars) {
@@ -110,25 +92,26 @@ function extractResultAuditFields(result, cfg) {
 export function createPluginRuntime(api, deps = {}) {
   const resolveConfigImpl = deps.resolvePluginConfig ?? resolvePluginConfig;
   const loadRulesImpl = deps.loadRules ?? loadRules;
-  const selectRulesImpl = deps.selectRules ?? selectRules;
-  const evaluateDeterministicImpl = deps.evaluateDeterministicDecision ?? evaluateDeterministicDecision;
   const callSupervisorImpl = deps.callSupervisor ?? callSupervisor;
+  const evaluatePolicyDecisionImpl = deps.evaluatePolicyDecision ?? evaluatePolicyDecision;
   const writeAuditEventImpl = deps.writeAuditEvent ?? writeAuditEvent;
   const cfg = resolveConfigImpl(api);
 
   const state = {
-    rulesPromise: null,
+    rulesCache: null,
     runContextByRunId: new Map(),
   };
 
-  async function ensureRules() {
-    if (!state.rulesPromise) {
-      state.rulesPromise = loadRulesImpl(cfg.rulesPath).catch((error) => {
+  async function ensureRules(forceReload = false) {
+    if (!state.rulesCache || forceReload) {
+      try {
+        state.rulesCache = await loadRulesImpl(cfg.rulesPath);
+      } catch (error) {
         api.logger?.warn?.(`policy-supervisor: failed to load rules (${error.message})`);
-        return { version: 1, defaults: {}, rules: [] };
-      });
+        throw error;
+      }
     }
-    return await state.rulesPromise;
+    return state.rulesCache;
   }
 
   async function audit(event) {
@@ -141,6 +124,10 @@ export function createPluginRuntime(api, deps = {}) {
 
   function pruneRunCache() {
     const cutoff = Date.now() - 30 * 60 * 1000;
+    while (state.runContextByRunId.size > 500) {
+      const oldest = state.runContextByRunId.keys().next().value;
+      state.runContextByRunId.delete(oldest);
+    }
     for (const [runId, value] of state.runContextByRunId) {
       if ((value?.ts ?? 0) < cutoff) {
         state.runContextByRunId.delete(runId);
@@ -161,12 +148,10 @@ export function createPluginRuntime(api, deps = {}) {
     });
   }
 
-  function buildToolPayload(event, ctx, runContext, rules) {
+  function buildToolSupervisorPayload(event, ctx, runContext, rules) {
     return {
       toolName: event.toolName,
-      params: cfg.redactSecrets
-        ? redactText(safeSerialize(event.params ?? {}))
-        : safeSerialize(event.params ?? {}),
+      params: event.params ?? {},
       runContext,
       sessionKey: ctx?.sessionKey,
       sessionId: ctx?.sessionId,
@@ -174,7 +159,7 @@ export function createPluginRuntime(api, deps = {}) {
     };
   }
 
-  function buildOutputPayload(event, runContext, rules) {
+  function buildOutputSupervisorPayload(event, runContext, rules) {
     return {
       assistantTexts: Array.isArray(event.assistantTexts)
         ? event.assistantTexts.map((value) => makeSafeText(value, cfg, 8000))
@@ -186,13 +171,26 @@ export function createPluginRuntime(api, deps = {}) {
     };
   }
 
-  function buildOutgoingPayload(event, ctx, rules) {
+  function buildOutgoingSupervisorPayload(event, ctx, rules) {
     return {
-      content: makeSafeText(event.content ?? "", cfg, 8000),
+      content: event.content ?? "",
       to: event.to,
       channelId: ctx?.channelId,
       conversationId: ctx?.conversationId,
       rules: summarizeRules(rules),
+    };
+  }
+
+  function baseAuditPayload(runContext, evaluation) {
+    return {
+      mode: evaluation.effectiveMode,
+      enforceCapable: evaluation.enforceCapable,
+      wouldEnforce: evaluation.wouldEnforce,
+      wouldExecute: evaluation.wouldExecute,
+      matchedRuleIds: evaluation.matchedRuleIds,
+      supervisorError: evaluation.supervisorError || "",
+      prompt: runContext?.prompt,
+      historyMessages: runContext?.historyMessages,
     };
   }
 
@@ -215,26 +213,33 @@ export function createPluginRuntime(api, deps = {}) {
 
       if (cfg.checkLlmOutput) {
         api.on("llm_output", async (event) => {
-          const ruleset = await ensureRules();
-          const rules = selectRulesImpl(ruleset.rules, { stage: "llm_output", mode: "llm" });
           const runContext = state.runContextByRunId.get(event.runId);
-          let supervisorDecision = null;
-
-          if (rules.length > 0) {
-            try {
-              supervisorDecision = await callSupervisorImpl({
-                config: {
-                  ...cfg.supervisor,
-                  enabled: cfg.supervisor.enabled && rules.length > 0,
-                  timeoutMs: cfg.supervisor.timeoutMs ?? cfg.timeoutMs,
-                },
-                stage: "llm_output",
-                payload: buildOutputPayload(event, runContext, rules),
-              });
-            } catch (error) {
-              supervisorDecision = { decision: "allow", reason: `supervisor error: ${error.message}` };
-            }
+          let ruleset;
+          try {
+            ruleset = await ensureRules();
+          } catch (error) {
+            await audit({
+              stage: "llm_output",
+              runId: event.runId,
+              sessionId: event.sessionId,
+              decision: "error",
+              reason: `rules load error: ${error.message}`,
+            });
+            return;
           }
+
+          const evaluation = await evaluatePolicyDecisionImpl({
+            cfg,
+            rules: ruleset.rules,
+            input: {
+              stage: "llm_output",
+              runContext,
+              rulesDefaults: ruleset.defaults,
+              supervisorPayload: buildOutputSupervisorPayload(event, runContext, ruleset.rules),
+              enforceCapable: false,
+            },
+            callSupervisorImpl,
+          });
 
           await audit({
             stage: "llm_output",
@@ -242,123 +247,77 @@ export function createPluginRuntime(api, deps = {}) {
             sessionId: event.sessionId,
             provider: event.provider,
             model: event.model,
-            decision: supervisorDecision?.decision ?? "allow",
-            reason: supervisorDecision?.reason ?? "",
-            matchedRuleIds: supervisorDecision?.violatedRules ?? [],
+            decision: evaluation.finalDecision,
+            reason: evaluation.supervisorDecision?.reason ?? evaluation.deterministicDecision?.reasons?.join(" ") ?? "",
             assistantTexts: Array.isArray(event.assistantTexts)
               ? event.assistantTexts.map((value) => makeSafeText(value, cfg, 8000))
               : [],
-            prompt: runContext?.prompt,
-            historyMessages: runContext?.historyMessages,
             usage: event.usage ?? undefined,
+            ...baseAuditPayload(runContext, evaluation),
           });
         });
       }
 
       if (cfg.checkToolCalls) {
         api.on("before_tool_call", async (event, ctx) => {
-          const ruleset = await ensureRules();
-          const allRules = selectRulesImpl(ruleset.rules, {
-            stage: "before_tool_call",
-            toolName: event.toolName,
-          });
           const runContext = event.runId ? state.runContextByRunId.get(event.runId) : undefined;
-          const toolAudit = extractToolAuditFields(event.toolName, event.params ?? {}, cfg);
-
-          const deterministicDecision = evaluateDeterministicImpl({
-            stage: "before_tool_call",
-            event,
-            rules: allRules,
-          });
-
-          if (deterministicDecision.decision !== "allow") {
-            await audit({
-              stage: "before_tool_call",
-              decisionSource: "deterministic",
-              runId: event.runId,
-              toolCallId: event.toolCallId,
-              sessionId: ctx?.sessionId,
-              sessionKey: ctx?.sessionKey,
-              reason: deterministicDecision.reasons.join(" "),
-              decision: deterministicDecision.decision,
-              matchedRuleIds: deterministicDecision.matchedRuleIds,
-              prompt: runContext?.prompt,
-              historyMessages: runContext?.historyMessages,
-              ...toolAudit,
-            });
-            if (cfg.mode === "enforce") {
-              return decisionToToolResult(deterministicDecision);
-            }
-          }
-
-          const llmRules = selectRulesImpl(allRules, { mode: "llm" });
-          if (llmRules.length === 0) {
-            return undefined;
-          }
-
+          let ruleset;
           try {
-            const supervisorDecision = normalizeDecisionForTool(
-              await callSupervisorImpl({
-                config: {
-                  ...cfg.supervisor,
-                  enabled: cfg.supervisor.enabled,
-                  timeoutMs: cfg.supervisor.timeoutMs ?? cfg.timeoutMs,
-                },
-                stage: "before_tool_call",
-                payload: buildToolPayload(event, ctx, runContext, llmRules),
-              }),
-            );
-
-            await audit({
-              stage: "before_tool_call",
-              decisionSource: "supervisor",
-              runId: event.runId,
-              toolCallId: event.toolCallId,
-              sessionId: ctx?.sessionId,
-              sessionKey: ctx?.sessionKey,
-              decision: supervisorDecision?.decision ?? "allow",
-              reason: supervisorDecision?.reason ?? "",
-              matchedRuleIds: supervisorDecision?.violatedRules ?? [],
-              safeUserMessage: supervisorDecision?.safeUserMessage ?? "",
-              rulesChecked: summarizeRules(llmRules),
-              prompt: runContext?.prompt,
-              historyMessages: runContext?.historyMessages,
-              ...toolAudit,
-            });
-
-            if (cfg.mode === "enforce") {
-              return decisionToToolResult(supervisorDecision);
-            }
+            ruleset = await ensureRules();
           } catch (error) {
             await audit({
               stage: "before_tool_call",
-              decisionSource: "supervisor",
+              decisionSource: "rules",
               runId: event.runId,
               toolCallId: event.toolCallId,
               sessionId: ctx?.sessionId,
               sessionKey: ctx?.sessionKey,
               decision: "error",
-              reason: error.message,
-              matchedRuleIds: llmRules.map((rule) => rule.id),
-              rulesChecked: summarizeRules(llmRules),
-              prompt: runContext?.prompt,
-              historyMessages: runContext?.historyMessages,
-              ...toolAudit,
+              reason: `rules load error: ${error.message}`,
+              ...extractToolAuditFields(event.toolName, event.params ?? {}, cfg),
             });
             if (cfg.mode === "enforce" && cfg.failClosedTools.has(event.toolName)) {
-              return {
-                block: true,
-                blockReason: "I'm not confident this risky step is safe yet. Please confirm it explicitly.",
-              };
+              return { block: true, blockReason: "Policy rules could not be loaded. Please confirm before continuing." };
             }
+            return undefined;
           }
 
+          const evaluation = await evaluatePolicyDecisionImpl({
+            cfg,
+            rules: ruleset.rules,
+            input: {
+              stage: "before_tool_call",
+              toolName: event.toolName,
+              params: event.params ?? {},
+              runContext,
+              rulesDefaults: ruleset.defaults,
+              supervisorPayload: buildToolSupervisorPayload(event, ctx, runContext, ruleset.rules),
+            },
+            callSupervisorImpl,
+          });
+
+          await audit({
+            stage: "before_tool_call",
+            decisionSource: evaluation.supervisorDecision ? "supervisor" : evaluation.deterministicDecision?.decision !== "allow" ? "deterministic" : "allow",
+            runId: event.runId,
+            toolCallId: event.toolCallId,
+            sessionId: ctx?.sessionId,
+            sessionKey: ctx?.sessionKey,
+            decision: evaluation.finalDecision,
+            reason: evaluation.supervisorDecision?.reason ?? evaluation.deterministicDecision?.reasons?.join(" ") ?? "",
+            safeUserMessage: evaluation.supervisorDecision?.safeUserMessage ?? evaluation.deterministicDecision?.safeUserMessage ?? "",
+            rulesChecked: summarizeRules(evaluation.selectedRules),
+            ...baseAuditPayload(runContext, evaluation),
+            ...extractToolAuditFields(event.toolName, event.params ?? {}, cfg),
+          });
+
+          if (evaluation.wouldEnforce) {
+            return decisionToToolResult(evaluation.finalDecisionObject);
+          }
           return undefined;
         });
 
         api.on("after_tool_call", async (event, ctx) => {
-          const toolAudit = extractToolAuditFields(event.toolName, event.params ?? {}, cfg);
-          const resultAudit = extractResultAuditFields(event.result, cfg);
           const runContext = event.runId ? state.runContextByRunId.get(event.runId) : undefined;
           await audit({
             stage: "after_tool_call",
@@ -369,85 +328,60 @@ export function createPluginRuntime(api, deps = {}) {
             durationMs: event.durationMs,
             error: event.error ?? "",
             prompt: runContext?.prompt,
-            ...toolAudit,
-            ...resultAudit,
+            ...extractToolAuditFields(event.toolName, event.params ?? {}, cfg),
+            ...extractResultAuditFields(event.result, cfg),
           });
         });
       }
 
       if (cfg.checkOutgoingMessages) {
         api.on("message_sending", async (event, ctx) => {
-          const ruleset = await ensureRules();
-          const allRules = selectRulesImpl(ruleset.rules, { stage: "message_sending" });
-          const deterministicDecision = evaluateDeterministicImpl({
-            stage: "message_sending",
-            event,
-            rules: allRules,
-          });
-
-          if (deterministicDecision.decision !== "allow") {
-            await audit({
-              stage: "message_sending",
-              decisionSource: "deterministic",
-              decision: deterministicDecision.decision,
-              reason: deterministicDecision.reasons.join(" "),
-              matchedRuleIds: deterministicDecision.matchedRuleIds,
-              channelId: ctx?.channelId,
-              conversationId: ctx?.conversationId,
-              to: event.to,
-              content: makeSafeText(event.content ?? "", cfg, 8000),
-            });
-            if (cfg.mode === "enforce") {
-              return decisionToOutgoingResult(deterministicDecision);
-            }
-          }
-
-          const llmRules = selectRulesImpl(allRules, { mode: "llm" });
-          if (llmRules.length === 0) {
-            return undefined;
-          }
-
+          let ruleset;
           try {
-            const supervisorDecision = await callSupervisorImpl({
-              config: {
-                ...cfg.supervisor,
-                enabled: cfg.supervisor.enabled,
-                timeoutMs: cfg.supervisor.timeoutMs ?? cfg.timeoutMs,
-              },
-              stage: "message_sending",
-              payload: buildOutgoingPayload(event, ctx, llmRules),
-            });
-
-            await audit({
-              stage: "message_sending",
-              decisionSource: "supervisor",
-              decision: supervisorDecision?.decision ?? "allow",
-              reason: supervisorDecision?.reason ?? "",
-              matchedRuleIds: supervisorDecision?.violatedRules ?? [],
-              safeUserMessage: supervisorDecision?.safeUserMessage ?? "",
-              channelId: ctx?.channelId,
-              conversationId: ctx?.conversationId,
-              to: event.to,
-              content: makeSafeText(event.content ?? "", cfg, 8000),
-            });
-
-            if (cfg.mode === "enforce") {
-              return decisionToOutgoingResult(supervisorDecision);
-            }
+            ruleset = await ensureRules();
           } catch (error) {
             await audit({
               stage: "message_sending",
-              decisionSource: "supervisor",
+              decisionSource: "rules",
               decision: "error",
-              reason: error.message,
-              matchedRuleIds: llmRules.map((rule) => rule.id),
+              reason: `rules load error: ${error.message}`,
               channelId: ctx?.channelId,
               conversationId: ctx?.conversationId,
               to: event.to,
               content: makeSafeText(event.content ?? "", cfg, 8000),
             });
+            return undefined;
           }
 
+          const evaluation = await evaluatePolicyDecisionImpl({
+            cfg,
+            rules: ruleset.rules,
+            input: {
+              stage: "message_sending",
+              content: event.content ?? "",
+              rulesDefaults: ruleset.defaults,
+              supervisorPayload: buildOutgoingSupervisorPayload(event, ctx, ruleset.rules),
+            },
+            callSupervisorImpl,
+          });
+
+          await audit({
+            stage: "message_sending",
+            decisionSource: evaluation.supervisorDecision ? "supervisor" : evaluation.deterministicDecision?.decision !== "allow" ? "deterministic" : "allow",
+            decision: evaluation.finalDecision,
+            reason: evaluation.supervisorDecision?.reason ?? evaluation.deterministicDecision?.reasons?.join(" ") ?? "",
+            safeUserMessage: evaluation.supervisorDecision?.safeUserMessage ?? evaluation.deterministicDecision?.safeUserMessage ?? "",
+            channelId: ctx?.channelId,
+            conversationId: ctx?.conversationId,
+            to: event.to,
+            content: makeSafeText(event.content ?? "", cfg, 8000),
+            rulesChecked: summarizeRules(evaluation.selectedRules),
+            ...baseAuditPayload(undefined, evaluation),
+          });
+
+          if (evaluation.wouldEnforce) {
+            return decisionToOutgoingResult(evaluation.finalDecisionObject);
+          }
           return undefined;
         });
       }

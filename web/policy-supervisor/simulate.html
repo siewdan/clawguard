@@ -142,6 +142,30 @@
         .replaceAll('>', '&gt;');
     }
 
+    async function authFetch(url, options = {}) {
+      const key = 'policySupervisorAccessToken';
+      let token = localStorage.getItem(key) || '';
+      const makeRequest = async (currentToken) => {
+        const headers = new Headers(options.headers || {});
+        if (currentToken) headers.set('Authorization', `Bearer ${currentToken}`);
+        return await fetch(url, { ...options, headers });
+      };
+      if (!token) {
+        token = window.prompt('Enter the ClawGuard access token') || '';
+        if (token) localStorage.setItem(key, token);
+      }
+      let response = await makeRequest(token);
+      if (response.status === 401) {
+        localStorage.removeItem(key);
+        token = window.prompt('Access token invalid or missing. Enter the ClawGuard access token again.') || '';
+        if (token) {
+          localStorage.setItem(key, token);
+          response = await makeRequest(token);
+        }
+      }
+      return response;
+    }
+
     const PRESETS = {
       'destructive-delete': {
         stage: 'before_tool_call',
@@ -235,7 +259,7 @@
     }
 
     async function run() {
-      const response = await fetch('/api/policy-supervisor/simulate', {
+      const response = await authFetch('/api/policy-supervisor/simulate', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(buildPayload()),

@@ -12,7 +12,8 @@ test("resolvePluginConfig uses workspace-relative defaults", () => {
   assert.equal(cfg.workspaceDir, "/tmp/workspace");
   assert.equal(cfg.rulesPath, "/tmp/workspace/policies/SUPERVISOR_RULES.md");
   assert.equal(cfg.auditLogPath, "/tmp/workspace/logs/policy-supervisor.jsonl");
-  assert.equal(cfg.mode, "audit");
+  assert.equal(cfg.mode, undefined);
+  assert.equal(cfg.modeExplicit, false);
   assert.equal(cfg.redactSecrets, true);
   assert.equal(cfg.failClosedTools.has("exec"), true);
 });
@@ -34,6 +35,7 @@ test("resolvePluginConfig resolves supervisor api key from env", () => {
   });
 
   assert.equal(cfg.mode, "enforce");
+  assert.equal(cfg.modeExplicit, true);
   assert.equal(cfg.supervisor.enabled, true);
   assert.equal(cfg.supervisor.baseUrl, "https://example.test/v1");
   assert.equal(cfg.supervisor.apiKey, "secret-key");

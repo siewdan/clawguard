@@ -15,6 +15,7 @@ function resolvePathAgainstWorkspace(workspaceDir, value, fallback) {
 
 export function resolvePluginConfig(api) {
   const pluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object" ? api.pluginConfig : {};
+  const modeExplicit = pluginConfig.mode === "audit" || pluginConfig.mode === "enforce";
   const workspaceDir = resolveWorkspaceDir(api);
   const supervisor = pluginConfig.supervisor && typeof pluginConfig.supervisor === "object"
     ? pluginConfig.supervisor
@@ -50,7 +51,8 @@ export function resolvePluginConfig(api) {
       pluginConfig.auditLogPath,
       "./logs/policy-supervisor.jsonl",
     ),
-    mode: pluginConfig.mode === "enforce" ? "enforce" : "audit",
+    mode: modeExplicit ? pluginConfig.mode : undefined,
+    modeExplicit,
     redactSecrets: pluginConfig.redactSecrets !== false,
     checkLlmInput: pluginConfig.checkLlmInput !== false,
     checkLlmOutput: pluginConfig.checkLlmOutput !== false,

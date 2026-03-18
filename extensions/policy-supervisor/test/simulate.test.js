@@ -32,9 +32,9 @@ test('simulatePolicyDecision reports wouldExecute in audit mode', async () => {
   });
 
   assert.equal(result.mode, 'audit');
-  assert.equal(result.finalDecision, 'block');
+  assert.equal(result.finalDecision, 'confirm');
   assert.equal(result.wouldEnforce, false);
   assert.equal(result.wouldExecute, true);
   assert.ok(result.matchedRuleIds.includes('no-delete-without-confirm'));
-  assert.ok(result.matchedRuleIds.includes('ask-when-ambiguous'));
+  assert.equal(result.matchedRuleIds.includes('ask-when-ambiguous'), false);
 });

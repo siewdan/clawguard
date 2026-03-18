@@ -23,6 +23,7 @@ function createHarness(overrides = {}) {
     rulesPath: "/tmp/workspace/policies/SUPERVISOR_RULES.md",
     auditLogPath: "/tmp/workspace/logs/policy-supervisor.jsonl",
     mode: "enforce",
+    modeExplicit: true,
     redactSecrets: true,
     checkLlmInput: true,
     checkLlmOutput: true,
