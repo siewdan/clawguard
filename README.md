@@ -1,101 +1,305 @@
 # ClawGuard
 
-ClawGuard is a compact policy-supervisor stack for OpenClaw. It audits and simulates prompts, tool calls, model outputs, and outgoing messages against a small rule set, with a deterministic layer for obvious cases and an optional supervisor LLM for ambiguous ones.
+ClawGuard is a compact policy-supervisor stack for OpenClaw. It combines:
 
-## What is included
+- deterministic checks for obvious risky cases
+- an optional supervisor LLM for ambiguous cases
+- JSONL audit logging
+- a simulator CLI/UI for safe policy testing
+- a small web UI for reviewing live decisions
 
-- `extensions/policy-supervisor/` — plugin source + tests
-- `policies/SUPERVISOR_RULES.md` — rule definitions and defaults
-- `web/policy-supervisor/index.html` — log viewer UI
-- `web/policy-supervisor/simulate.html` — simulator UI
-- `scripts/policy-supervisor-simulate.mjs` — CLI simulator
-- `scripts/policy-supervisor-web-server.py` — local web/API server
-- `scripts/serve-policy-supervisor-web.sh` — convenience launcher
-- `deploy/systemd-user/policy-supervisor-web.service` — user systemd service example
-- `docs/policy-supervisor.md` — semantics, rollout, security, and deployment notes
+It is currently strongest as an **audit-first operator tool** rather than a full-blown policy platform.
 
-## Current status
+## Install the plugin
 
-ClawGuard is currently strongest as an **audit-first operator tool**:
+The repo is designed to work against a live OpenClaw workspace.
 
-- inspect decisions in live logs
-- simulate policy outcomes safely
-- roll out in `audit` before switching any path to `enforce`
+### 1. Make the plugin available in the workspace
 
-The current live rollout is intentionally **audit-first**.
+Typical local layout:
 
-## Core decision model
+- repo checkout: `~/clawguard`
+- live OpenClaw workspace: `~/.openclaw/workspace`
 
-For each stage, ClawGuard evaluates rules in a single shared engine used by both the runtime plugin and the simulator.
-
-### Evaluation order
-
-1. Select rules for the current stage/tool
-2. Run deterministic checks first
-3. If deterministic already returns a non-`allow` decision, stop there
-4. Only call the supervisor LLM for still-ambiguous cases
-5. Merge to a final decision
-
-This means simulator and runtime now have the same short-circuit behavior.
-
-### Effective mode
-
-The effective mode comes from:
-
-1. explicit plugin config, if set
-2. otherwise rule defaults in `SUPERVISOR_RULES.md`
-3. otherwise `audit`
-
-### Timeout / supervisor-failure behavior
-
-Rules can provide stage-aware defaults such as:
-
-- `onTimeout.tool`
-- `onTimeout.outbound`
-- `onTimeout.output`
-
-These defaults are applied by the shared policy engine, so simulator and runtime now handle supervisor failures consistently.
-
-For tool calls, `revise` is normalized to `confirm`, because a tool call cannot be silently rewritten the way an outgoing message can.
-
-### Audit vs enforce
-
-A reported `finalDecision` is not the same thing as actual enforcement.
-
-The simulator exposes the most important fields directly:
-
-- `finalDecision` — the merged policy result
-- `wouldEnforce` — whether that result would be enforced in the current mode/stage
-- `wouldExecute` — whether the underlying action would still run
-- `deterministicDecision` — deterministic layer result
-- `supervisorDecision` — supervisor result, if any
-- `matchedRuleIds` — rules that contributed to the result
-
-In `audit` mode, `block` / `confirm` / `revise` still appear in logs and simulator output, but they represent what ClawGuard **would** do, not necessarily what it **did** enforce.
-
-## Quick start
-
-### Run tests
+The simplest setup is to expose the plugin inside the workspace via symlink:
 
 ```bash
-cd extensions/policy-supervisor
+mkdir -p ~/.openclaw/workspace/extensions
+ln -s ~/clawguard/extensions/policy-supervisor ~/.openclaw/workspace/extensions/policy-supervisor
+```
+
+### 2. Place the rules file where the plugin expects it
+
+By default the plugin resolves rules relative to the OpenClaw workspace:
+
+- default rules path: `./policies/SUPERVISOR_RULES.md`
+- default audit log path: `./logs/policy-supervisor.jsonl`
+
+Typical setup:
+
+```bash
+mkdir -p ~/.openclaw/workspace/policies
+cp ~/clawguard/policies/SUPERVISOR_RULES.md ~/.openclaw/workspace/policies/SUPERVISOR_RULES.md
+```
+
+### 3. Enable/configure the plugin in OpenClaw
+
+The plugin id is:
+
+- `policy-supervisor`
+
+Important config fields are defined in:
+
+- `extensions/policy-supervisor/openclaw.plugin.json`
+
+The most important ones are:
+
+- `rulesPath`
+- `auditLogPath`
+- `mode`
+- `supervisor.*`
+- `checkToolCalls`
+- `checkOutgoingMessages`
+
+### 4. Run it in `audit` first
+
+That is the intended rollout.
+
+Even if rules return `confirm`, `revise`, or `block`, audit mode lets you inspect behavior before you start enforcing it.
+
+---
+
+## Where and how to write rules
+
+Rules live in:
+
+- `policies/SUPERVISOR_RULES.md`
+
+The current MVP deliberately stores the machine-readable rules as a JSON block inside Markdown.
+
+### Structure
+
+The file has two parts:
+
+1. `defaults`
+2. `rules`
+
+Example:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "mode": "enforce",
+    "onTimeout": {
+      "tool": "confirm",
+      "outbound": "revise"
+    }
+  },
+  "rules": [
+    {
+      "id": "no-delete-without-confirm",
+      "enabled": true,
+      "stage": "before_tool_call",
+      "tools": ["exec", "write", "edit"],
+      "mode": "deterministic",
+      "action": "confirm",
+      "severity": "high",
+      "description": "Never delete or overwrite files without explicit confirmation."
+    }
+  ]
+}
+```
+
+### What the main fields mean
+
+- `defaults.mode`
+  - baseline mode if plugin config does **not** set an explicit mode
+  - typical values: `audit`, `enforce`
+
+- `defaults.onTimeout.*`
+  - fallback behavior when the supervisor LLM errors or times out
+  - currently used stage families:
+    - `tool`
+    - `outbound`
+    - `output`
+
+- `stage`
+  - where the rule applies
+  - current practical values include:
+    - `before_tool_call`
+    - `message_sending`
+    - `llm_output`
+
+- `mode`
+  - how the rule is evaluated
+  - `deterministic` = code-based checks
+  - `llm` = supervisor-model review
+
+- `action`
+  - intended policy outcome
+  - one of:
+    - `allow`
+    - `revise`
+    - `confirm`
+    - `block`
+
+- `tools`
+  - optional tool filter for tool-call stages
+
+### Important current limitation
+
+The rules are only **partly declarative** right now.
+
+They configure a lot, but some deterministic semantics still live in code paths such as `deterministic.js` by `rule.id`. So the rules are useful and compact, but they are not yet a fully generic policy DSL.
+
+---
+
+## How to test rules
+
+You should test rules in three different ways.
+
+### 1. Unit tests
+
+```bash
+cd ~/clawguard/extensions/policy-supervisor
 node --test
 ```
 
-### Run the simulator from CLI
+This verifies the plugin/runtime behavior, shared policy engine, simulator behavior, and config handling.
+
+### 2. CLI simulator
+
+Useful for quick single cases:
 
 ```bash
-node scripts/policy-supervisor-simulate.mjs \
+node ~/clawguard/scripts/policy-supervisor-simulate.mjs \
   --tool exec \
   --command 'rm -rf tmp/cache' \
   --prompt 'Delete the cache directory'
 ```
 
-### Run the local web server
+You can also pipe JSON into it for larger suites:
 
 ```bash
-./scripts/serve-policy-supervisor-web.sh
+echo '{"stage":"before_tool_call","toolName":"exec","params":{"command":"rm -rf tmp/cache"},"prompt":"Delete the cache directory"}' \
+  | node ~/clawguard/scripts/policy-supervisor-simulate.mjs
 ```
+
+### 3. Simulator UI
+
+If the web service is running:
+
+- `http://127.0.0.1:18891/web/policy-supervisor/simulate.html`
+
+This is useful when you want to compare `finalDecision`, `wouldEnforce`, and `matchedRuleIds` without executing anything.
+
+---
+
+## What the status fields mean
+
+The simulator reports several fields that answer different questions.
+
+### `mode`
+The **effective mode** for this evaluation.
+
+Resolution order:
+1. explicit plugin config
+2. rules default (`defaults.mode`)
+3. fallback `audit`
+
+### `enforced`
+Whether the current stage is an enforce-capable stage **and** the effective mode is `enforce`.
+
+This is broader than the final decision itself. It tells you whether this path is generally operating as an enforcing path.
+
+### `finalDecision`
+The merged policy outcome after combining:
+
+- deterministic result
+- supervisor result, if any
+
+Possible values:
+- `allow`
+- `revise`
+- `confirm`
+- `block`
+
+### `wouldEnforce`
+Whether this specific result would actually be enforced.
+
+Examples:
+- in `audit` mode, `finalDecision: block` can still have `wouldEnforce: false`
+- in `enforce` mode on `before_tool_call`, `finalDecision: confirm` usually means `wouldEnforce: true`
+
+### `wouldExecute`
+Whether the underlying action would still go through.
+
+This is effectively the operator-facing inverse of `wouldEnforce`.
+
+- `wouldExecute: true` means the action would still proceed
+- `wouldExecute: false` means ClawGuard would stop/alter it
+
+### `deterministicDecision`
+What the deterministic layer concluded.
+
+This is important because ClawGuard now short-circuits: if deterministic already returns a non-`allow` decision, the supervisor is not called for that case.
+
+### `supervisorDecision`
+What the supervisor model concluded, if it was called.
+
+If this is missing/`allow`, it can mean either:
+- no matching LLM rule applied
+- deterministic already decided the case
+- or the supervisor allowed it
+
+### `matchedRuleIds`
+Which rules contributed to the result.
+
+This is usually the fastest way to understand *why* a decision happened.
+
+### `supervisorError`
+If the supervisor failed or timed out, the error is surfaced here.
+
+The final behavior in that case comes from `defaults.onTimeout.*`.
+
+### `onTimeout`
+The resolved timeout behavior that applied to this simulation.
+
+This helps you verify fallback semantics directly instead of inferring them from config/rules by hand.
+
+---
+
+## Core decision model
+
+Runtime plugin and simulator now use the same shared policy engine.
+
+### Evaluation order
+
+1. select matching rules for the current stage/tool
+2. run deterministic checks first
+3. if deterministic is already non-`allow`, stop there
+4. otherwise call the supervisor LLM for matching LLM rules
+5. merge to a final decision
+6. enforce only when mode/stage allow enforcement
+
+This removes the earlier drift between simulator and runtime.
+
+### Audit vs enforce
+
+A result like `block` or `confirm` does **not** automatically mean ClawGuard blocked anything.
+
+You always need to read it together with:
+
+- `mode`
+- `wouldEnforce`
+- `wouldExecute`
+
+That is the difference between:
+- “policy says this is bad”
+- and “runtime would actually stop it”
+
+---
 
 ## Web UI
 
@@ -104,26 +308,42 @@ Default local URLs:
 - Logs UI: `http://127.0.0.1:18891/web/policy-supervisor/index.html`
 - Simulator UI: `http://127.0.0.1:18891/web/policy-supervisor/simulate.html`
 
-The browser pages prompt for the ClawGuard access token when needed, then store it in `localStorage` and attach it automatically on later requests.
+The browser pages prompt for the ClawGuard access token when needed, then store it in `localStorage` and send it automatically on later requests.
+
+---
 
 ## Web security model
 
-The web server is now intentionally small and restrictive:
+The web server is intentionally small and restrictive.
 
-- only allowlisted static routes are served
-- `/logs/policy-supervisor.jsonl` requires a bearer token
-- `/api/policy-supervisor/simulate` requires a bearer token
-- request bodies are size-limited
-- simulator subprocesses are timeout-limited
-- code defaults to binding `127.0.0.1`
+### Static routes
 
-### Access token
+Only allowlisted static routes are served:
 
-The example systemd service loads configuration from:
+- `/`
+- `/web/policy-supervisor/index.html`
+- `/web/policy-supervisor/simulate.html`
+
+### Protected routes
+
+These require a bearer token when `POLICY_SUPERVISOR_WEB_TOKEN` is set:
+
+- `/logs/policy-supervisor.jsonl`
+- `/api/policy-supervisor/simulate`
+
+### Other protections
+
+- request body size limit
+- simulator subprocess timeout
+- default bind address in code is `127.0.0.1`
+
+### Access token config
+
+The example service reads:
 
 - `~/.config/policy-supervisor-web.env`
 
-Typical settings:
+Typical values:
 
 ```bash
 POLICY_SUPERVISOR_WEB_BIND=0.0.0.0
@@ -134,31 +354,31 @@ POLICY_SUPERVISOR_WEB_TOKEN=...
 
 Do **not** commit the real token.
 
-## Live integration notes
-
-By default, the simulator and web server expect a live OpenClaw installation at:
-
-- OpenClaw config: `~/.openclaw/openclaw.json`
-- live audit log: `~/.openclaw/workspace/logs/policy-supervisor.jsonl`
-- live policy workspace: `~/.openclaw/workspace`
-
-These can be overridden through environment variables where supported.
+---
 
 ## Deploy / systemd
 
-Install or update the user service from:
+Example unit:
 
 - `deploy/systemd-user/policy-supervisor-web.service`
 
 Typical flow:
 
 ```bash
-cp deploy/systemd-user/policy-supervisor-web.service ~/.config/systemd/user/
+cp ~/clawguard/deploy/systemd-user/policy-supervisor-web.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now policy-supervisor-web.service
 ```
 
-For manual launching, `scripts/serve-policy-supervisor-web.sh` also loads `~/.config/policy-supervisor-web.env` when present.
+For manual launching, use:
+
+```bash
+~/clawguard/scripts/serve-policy-supervisor-web.sh
+```
+
+That launcher also loads `~/.config/policy-supervisor-web.env` when present.
+
+---
 
 ## More detail
 
@@ -167,8 +387,8 @@ See `docs/policy-supervisor.md` for:
 - stage semantics
 - timeout semantics
 - audit/enforce behavior
-- web deployment and exposure guidance
-- current known limitations
+- deployment guidance
+- current limitations
 
 ## License
 
